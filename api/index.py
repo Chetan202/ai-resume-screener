@@ -3,7 +3,18 @@ import json
 import os
 import time
 from dotenv import load_dotenv
+import re
+import httpx
+from pydantic import BaseModel
+from bs4 import BeautifulSoup
+class JobUrlRequest(BaseModel):
+    url: str
 
+
+class JobUrlResponse(BaseModel):
+    url: str
+    title: str | None
+    job_description: str
 load_dotenv()
 from docx import Document
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -380,3 +391,122 @@ async def screen(
         results=results,
         skipped=skipped,
     )
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+FETCH_FAILED = (
+    "That link could not be opened. Many job boards block automated access "
+    "or need a login. Paste the description text instead."
+)
+
+THIN_PAGE = (
+    "The page opened but did not contain enough readable text. "
+    "Paste the description text instead."
+)
+NOISE_LINES = {
+    "skip to main content",
+    "skip to footer",
+    "careers",
+    "expand menu",
+    "save this job",
+    "unsave this job",
+    "share this job",
+    "copy link",
+    "linkedin",
+    "x",
+    "facebook",
+    "email",
+    "apply for this job",
+}
+
+NOISE_PREFIXES = (
+    "learn more",
+    "discover where this job fits",
+    "about accenture",
+    "additional information",
+    "equal employment opportunity",
+    "job candidates will not be",
+    "accenture is committed",
+    "please read accenture",
+    "we work with one shared purpose",
+    "we believe that delivering value",
+    "at accenture, we see well-being",
+    "join accenture to work",
+)
+
+
+def extract_page_text(html):
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "svg", "button", "a"]):
+        tag.decompose()
+
+    title = soup.title.get_text(strip=True) if soup.title else None
+
+    raw_lines = soup.get_text("\n").split("\n")
+    cleaned = []
+    seen = set()
+
+    for line in raw_lines:
+        stripped = line.strip()
+
+        if not stripped:
+            continue
+
+        lowered = stripped.lower()
+
+        if lowered in NOISE_LINES:
+            continue
+
+        if lowered.startswith(NOISE_PREFIXES):
+            continue
+
+        if len(stripped) < 3:
+            continue
+
+        if stripped in seen:
+            continue
+
+        seen.add(stripped)
+        cleaned.append(stripped)
+
+    text = "\n".join(cleaned)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return title, text.strip()
+
+@app.post("/api/fetch-job", response_model=JobUrlResponse)
+def fetch_job(payload: JobUrlRequest):
+    url = payload.url.strip()
+
+    if not url:
+        raise HTTPException(status_code=400, detail="Enter a link first.")
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    try:
+        with httpx.Client(
+            timeout=15.0, follow_redirects=True, headers=BROWSER_HEADERS
+        ) as http_client:
+            response = http_client.get(url)
+            response.raise_for_status()
+    except Exception:
+        raise HTTPException(status_code=422, detail=FETCH_FAILED)
+
+    if "html" not in response.headers.get("content-type", "") and not response.text:
+        raise HTTPException(status_code=422, detail=FETCH_FAILED)
+
+    try:
+        title, text = extract_page_text(response.text)
+    except Exception:
+        raise HTTPException(status_code=422, detail=FETCH_FAILED)
+
+    if len(text) < 250:
+        raise HTTPException(status_code=422, detail=THIN_PAGE)
+
+    return JobUrlResponse(url=url, title=title, job_description=text[:20000])

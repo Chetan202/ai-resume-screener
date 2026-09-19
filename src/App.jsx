@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const verdictTone = {
   "Strong Match": "strong",
@@ -6,6 +6,48 @@ const verdictTone = {
   "Weak Match": "weak",
   "Poor Match": "poor",
 };
+
+const THINKING_STEPS = [
+  "Reading every page carefully…",
+  "Extracting skills and experience…",
+  "Matching against the role requirements…",
+  "Weighing education and seniority…",
+  "Scoring each candidate…",
+  "Building ranked shortlist…",
+  "Almost there — final checks…",
+];
+
+function ThinkingPanel({ fileCount }) {
+  const [step, setStep] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setStep((s) => (s + 1) % THINKING_STEPS.length);
+    }, 2200);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div className="thinking" aria-live="polite" aria-busy="true">
+      <div className="thinking-orb">
+        <span className="orb-ring" />
+        <span className="orb-ring" />
+        <span className="orb-core" />
+      </div>
+      <h3>
+        Thinking through {fileCount} resume{fileCount !== 1 ? "s" : ""}
+      </h3>
+      <p className="thinking-step" key={step}>
+        {THINKING_STEPS[step]}
+      </p>
+      <div className="thinking-dots">
+        <span />
+        <span />
+        <span />
+      </div>
+    </div>
+  );
+}
 
 function Bar({ score }) {
   return (
@@ -42,10 +84,12 @@ function Candidate({ result, rank }) {
         <div className="candidate-body">
           <div className="checks">
             <span className={result.experience_match ? "yes" : "no"}>
-              Experience {result.experience_match ? "meets the bar" : "falls short"}
+              Experience{" "}
+              {result.experience_match ? "meets the bar" : "falls short"}
             </span>
             <span className={result.education_match ? "yes" : "no"}>
-              Education {result.education_match ? "meets the bar" : "falls short"}
+              Education{" "}
+              {result.education_match ? "meets the bar" : "falls short"}
             </span>
           </div>
 
@@ -89,6 +133,11 @@ function Candidate({ result, rank }) {
 
 export default function App() {
   const [jobDescription, setJobDescription] = useState("");
+  const [mode, setMode] = useState("paste");
+  const [url, setUrl] = useState("");
+  const [fetching, setFetching] = useState(false);
+  const [fetchNote, setFetchNote] = useState("");
+  const [fetchFailed, setFetchFailed] = useState(false);
   const [jobUrl, setJobUrl] = useState("");
   const [files, setFiles] = useState([]);
   const [data, setData] = useState(null);
@@ -113,13 +162,52 @@ export default function App() {
     setFiles(accepted.slice(0, 20));
   }
 
+  async function loadFromUrl() {
+    setFetching(true);
+    setFetchNote("");
+    setFetchFailed(false);
+
+    try {
+      const response = await fetch("/api/fetch-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        setFetchFailed(true);
+        setFetchNote(
+          payload.detail ||
+            "That link could not be read. Paste the text instead."
+        );
+        setMode("paste");
+      } else {
+        setJobDescription(payload.job_description);
+        setFetchNote(
+          `Loaded ${payload.job_description.length} characters${
+            payload.title ? ` from ${payload.title}` : ""
+          }. Edit below before screening.`
+        );
+        setMode("paste");
+      }
+    } catch {
+      setFetchFailed(true);
+      setFetchNote(
+        "The server did not respond. Paste the description text instead."
+      );
+      setMode("paste");
+    } finally {
+      setFetching(false);
+    }
+  }
+
   async function fetchJobDescription() {
     if (!jobUrl.trim()) return;
     setFetchingJd(true);
     setError("");
 
     try {
-      // Replace with your real endpoint later
       await new Promise((r) => setTimeout(r, 700));
       setJobDescription(
         `Fetched from: ${jobUrl}\n\n(Replace this mock with real content from your backend)`
@@ -150,7 +238,9 @@ export default function App() {
         setData(payload);
       }
     } catch {
-      setError("The server did not respond. Check your connection and try again.");
+      setError(
+        "The server did not respond. Check your connection and try again."
+      );
     } finally {
       setLoading(false);
     }
@@ -175,33 +265,49 @@ export default function App() {
       </header>
 
       <section className="panel">
-        {/* <label htmlFor="job-url">Job posting URL <span>(optional)</span></label>
-        <div className="url-row">
-          <input
-            id="job-url"
-            type="url"
-            placeholder="https://linkedin.com/jobs/view/… or any job page"
-            value={jobUrl}
-            onChange={(e) => setJobUrl(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && fetchJobDescription()}
-          />
+        <div className="tabs">
           <button
-            type="button"
-            disabled={!jobUrl.trim() || fetchingJd}
-            onClick={fetchJobDescription}
+            className={mode === "paste" ? "on" : ""}
+            onClick={() => setMode("paste")}
           >
-            {fetchingJd ? "Fetching…" : "Fetch"}
+            Paste the description
           </button>
-        </div> */}
+          <button
+            className={mode === "url" ? "on" : ""}
+            onClick={() => setMode("url")}
+          >
+            Load from a link
+          </button>
+        </div>
 
-        <label htmlFor="jd">Job description</label>
-        <textarea
-          id="jd"
-          rows={10}
-          placeholder="Paste the full job description, including required skills, years of experience and education…"
-          value={jobDescription}
-          onChange={(e) => setJobDescription(e.target.value)}
-        />
+        {mode === "url" ? (
+          <div className="url-row">
+            <input
+              type="url"
+              placeholder="https://careers.example.com/ai-developer"
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              onKeyDown={(event) =>
+                event.key === "Enter" && url.trim() && loadFromUrl()
+              }
+            />
+            <button onClick={loadFromUrl} disabled={!url.trim() || fetching}>
+              {fetching ? "Reading…" : "Read link"}
+            </button>
+          </div>
+        ) : (
+          <textarea
+            id="jd"
+            rows={11}
+            placeholder="Paste the full job description, including required skills, years of experience and education."
+            value={jobDescription}
+            onChange={(event) => setJobDescription(event.target.value)}
+          />
+        )}
+
+        {fetchNote && (
+          <p className={fetchFailed ? "note bad" : "note"}>{fetchNote}</p>
+        )}
 
         <label htmlFor="files">The candidates</label>
         <div
@@ -240,7 +346,9 @@ export default function App() {
                     className="remove-file"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setFiles((prev) => prev.filter((f) => f.name !== file.name));
+                      setFiles((prev) =>
+                        prev.filter((f) => f.name !== file.name)
+                      );
                     }}
                   >
                     ×
@@ -251,11 +359,12 @@ export default function App() {
           )}
         </div>
 
-        <button className="cta" disabled={!ready} onClick={run}>
+        <button className="cta" disabled={!ready || loading} onClick={run}>
           {loading ? (
             <>
               <span className="spinner" />
-              Screening {files.length} resume{files.length !== 1 ? "s" : ""}…
+              Screening {files.length} resume
+              {files.length !== 1 ? "s" : ""}…
             </>
           ) : (
             "Screen resumes"
@@ -265,7 +374,9 @@ export default function App() {
         {error && <p className="note bad">{error}</p>}
       </section>
 
-      {data && (
+      {loading && <ThinkingPanel fileCount={files.length} />}
+
+      {data && !loading && (
         <section className="results">
           <div className="summary">
             <div>
